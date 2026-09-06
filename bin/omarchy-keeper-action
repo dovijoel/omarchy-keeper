@@ -4,7 +4,7 @@
 # omarchy:group=keeper
 # omarchy:name=action
 # omarchy:hidden=true
-# omarchy:args=<status | get UID | totp UID | copy UID FIELD | type UID FIELD | open UID | add TITLE LOGIN URL PASSWORD [NOTES] | edit UID TITLE LOGIN URL PASSWORD [NOTES] | delete UID>
+# omarchy:args=<status | get UID | totp UID | copy UID FIELD | type UID FIELD | open UID | clip (stdin) | typetext (stdin) | add TITLE LOGIN URL PASSWORD [NOTES] [KIND] | edit UID TITLE LOGIN URL PASSWORD [NOTES] [KIND] | delete UID>
 
 set -euo pipefail
 source "$(dirname "$(readlink -f "$0")")/common.sh"
@@ -14,10 +14,29 @@ keeper_config_load
 cmd="${1:-}"
 shift || true
 
+# First masked value on a record that has no password field: the note of a
+# Secure Note, or a custom "secret" field holding an API key.
+fetch_primary_secret() {
+  local json
+  json=$(keeper_run get "$1" --format json --unmask) || return 1
+  jq -r '
+    def first_value: if type == "array" then (.[0] // "") else (. // "") end;
+    [((.fields // []) + (.custom // []))[]
+      | select(.type == "note" or .type == "secret" or .type == "password")
+      | (.value | first_value) | tostring
+      | select(. != "")][0] // (.password // "")
+  ' <<<"$json"
+}
+
 fetch_field() {
   # $1 = uid, $2 = password | login | totp
   case "$2" in
-    password) keeper_run clipboard-copy "$1" --output stdout ;;
+    password)
+      local v
+      v=$(keeper_run clipboard-copy "$1" --output stdout) || return 1
+      [[ -n ${v//[[:space:]]/} ]] || v=$(fetch_primary_secret "$1") || return 1
+      printf '%s\n' "$v"
+      ;;
     login) keeper_run clipboard-copy "$1" --output stdout --login ;;
     totp) keeper_run clipboard-copy "$1" --output stdout --totp ;;
     *) return 1 ;;
@@ -72,11 +91,18 @@ case "$cmd" in
         notes: (.notes // "" | clean),
         folder: (.folder.path // "" | clean),
         modified: (.client_modified_time // "" | clean),
-        custom: (((.custom // []) + (.fields // []))
-          | map(select((.type // "") as $t | ["login","url","password","oneTimeCode","otp","fileRef","passkey"] | index($t) | not))
-          | map(select(((.value // []) | if type == "array" then length else 1 end) > 0))
-          | map({label: (.label // .type // "" | clean), value: ((.value | first_value) | tostring)})
-          | map(select(.value != "" and .value != "{}")))
+        extras: ((
+            (if ((.notes // "") | clean) == "" then [] else [{label: "Notes", value: (.notes | clean), masked: false}] end)
+            + (((.fields // []) + (.custom // []))
+              | map(select((.type // "") as $t | ["login","url","password","oneTimeCode","otp","fileRef","passkey","date","email"] | index($t) | not))
+              | map(select(((.value // []) | if type == "array" then length else 1 end) > 0))
+              | map({
+                  label: ((.label // "" | clean) as $l | if $l != "" then $l elif .type == "note" then "Note" elif .type == "secret" then "Secret" else (.type // "" | clean) end),
+                  value: ((.value | first_value) | tostring),
+                  masked: ((.type // "") as $t | ["note","secret","keyPair","pinCode","securityQuestion"] | index($t) != null)
+                })
+              | map(select(.value != "" and .value != "{}" and .value != "[]")))
+          )[0:9])
       }' <<<"$json"
     ;;
 
@@ -118,6 +144,22 @@ case "$cmd" in
     echo "typed"
     ;;
 
+  clip)
+    # Value on stdin (NUL- or EOF-terminated) → sensitive clipboard. Used for
+    # notes and custom fields the overlay already holds after `get`.
+    IFS= read -r -d '' value || true
+    [[ -n $value ]] || { echo "empty" >&2; exit 3; }
+    keeper_copy_sensitive "$value"
+    echo "copied"
+    ;;
+
+  typetext)
+    IFS= read -r -d '' value || true
+    [[ -n $value ]] || { echo "empty" >&2; exit 3; }
+    keeper_type_text "$value"
+    echo "typed"
+    ;;
+
   open)
     uid="${1:?uid}"
     url=$(jq -r --arg uid "$uid" '.[] | select(.record_uid == $uid) | .url // ""' "$OMARCHY_KEEPER_INDEX" 2>/dev/null | head -n 1)
@@ -132,12 +174,18 @@ case "$cmd" in
     ;;
 
   add)
-    # add TITLE LOGIN URL PASSWORD [NOTES]; PASSWORD "$GEN" generates one and
-    # copies it to the clipboard afterwards so the user can paste it right away.
-    title="${1:?title}"; login="${2:-}"; url="${3:-}"; password="${4:-\$GEN}"; notes="${5:-}"
+    # add TITLE LOGIN URL PASSWORD [NOTES] [KIND]; PASSWORD "$GEN" generates one
+    # and copies it afterwards. KIND: login (default) | apikey (a login record
+    # whose password field holds the key) | note (a Secure Note; PASSWORD is
+    # the masked note body).
+    title="${1:?title}"; login="${2:-}"; url="${3:-}"; password="${4:-\$GEN}"; notes="${5:-}"; kind="${6:-login}"
     keeper_require || exit 1
-    args=(record-add --title "$title" --record-type login --format json "login=$login" "password=$password")
-    [[ -n $url ]] && args+=("url=$url")
+    if [[ $kind == note ]]; then
+      args=(record-add --title "$title" --record-type encryptedNotes --format json "note=$password")
+    else
+      args=(record-add --title "$title" --record-type login --format json "login=$login" "password=$password")
+      [[ -n $url ]] && args+=("url=$url")
+    fi
     [[ -n $notes ]] && args+=(--notes "$notes")
     out=$(keeper_run "${args[@]}") || exit 1
     new_uid=$(jq -r '.record_uid // empty' <<<"$out" 2>/dev/null || true)
@@ -157,12 +205,16 @@ case "$cmd" in
   edit)
     # edit UID TITLE LOGIN URL PASSWORD [NOTES]; an empty PASSWORD keeps the
     # current one, "$GEN" generates a new one.
-    uid="${1:?uid}"; title="${2:-}"; login="${3:-}"; url="${4:-}"; password="${5:-}"; notes="${6:-}"
+    uid="${1:?uid}"; title="${2:-}"; login="${3:-}"; url="${4:-}"; password="${5:-}"; notes="${6:-}"; kind="${7:-login}"
     keeper_require || exit 1
     args=(record-update -r "$uid" --force)
     [[ -n $title ]] && args+=(--title "$title")
-    args+=("login=$login" "url=$url")
-    [[ -n $password ]] && args+=("password=$password")
+    if [[ $kind == note ]]; then
+      [[ -n $password ]] && args+=("note=$password")
+    else
+      args+=("login=$login" "url=$url")
+      [[ -n $password ]] && args+=("password=$password")
+    fi
     [[ -n $notes ]] && args+=(--notes "$notes")
     keeper_run "${args[@]}" >/dev/null || exit 1
     copied=false
@@ -187,7 +239,7 @@ case "$cmd" in
     ;;
 
   *)
-    echo "Usage: omarchy-keeper-action <status | get UID | totp UID | copy UID FIELD | type UID FIELD | open UID | add TITLE LOGIN URL PASSWORD [NOTES] | edit UID TITLE LOGIN URL PASSWORD [NOTES] | delete UID>" >&2
+    echo "Usage: omarchy-keeper-action <status | get UID | totp UID | copy UID FIELD | type UID FIELD | open UID | clip (stdin) | typetext (stdin) | add TITLE LOGIN URL PASSWORD [NOTES] [KIND] | edit UID TITLE LOGIN URL PASSWORD [NOTES] [KIND] | delete UID>" >&2
     exit 1
     ;;
 esac

@@ -46,6 +46,9 @@ Item {
   property bool formShowPassword: false
   property bool formBusy: false
   property bool pendingAdd: false
+  property int pendingExtra: -1
+  property string formKind: "login"   // login | apikey | note
+  readonly property var formKinds: ["login", "apikey", "note"]
 
   property string busyText: ""
   property string toastText: ""
@@ -97,6 +100,8 @@ Item {
     try {
       var payload = payloadJson ? JSON.parse(payloadJson) : {}
       wantAdd = payload.mode === "add"
+      if (typeof payload.query === "string" && payload.query) { root.filterText = payload.query; rebuild() }
+      if (payload.details === true) root.pendingExtra = -2   // load details once ready, copy nothing
     } catch (e) {}
     // The status probe is asynchronous; on a cold open the form has to wait
     // for it before it can be shown.
@@ -282,6 +287,45 @@ Item {
     root.dismiss()
   }
 
+  // Extras are the notes and custom fields of the loaded record (API keys
+  // usually live there). Ctrl+digit copies one; details load first if needed.
+  function extraAt(i) {
+    var rec = selectedRecord()
+    if (!rec || !root.detail || root.detailUid !== rec.uid) return null
+    var list = root.detail.extras || []
+    return (i >= 0 && i < list.length) ? list[i] : null
+  }
+
+  function copyExtra(i) {
+    var rec = selectedRecord()
+    if (!rec) return
+    if (!root.detail || root.detailUid !== rec.uid) {
+      root.pendingExtra = i
+      loadDetail()
+      return
+    }
+    var extra = extraAt(i)
+    if (!extra) { showToast("No field " + (i + 1) + " on this record", true); return }
+    if (clipProc.running) return
+    clipProc.label = extra.label
+    clipProc.payload = extra.value
+    clipProc.stdinEnabled = true
+    clipProc.command = [scriptPath("omarchy-keeper-action"), "clip"]
+    clipProc.running = true
+  }
+
+  function cycleFormKind() {
+    var i = root.formKinds.indexOf(root.formKind)
+    root.formKind = root.formKinds[(i + 1) % root.formKinds.length]
+    if (root.formKind === "login") root.formGenerate = !root.formUid
+    else root.formGenerate = false
+    Qt.callLater(function() { formTitle.forceActiveFocus() })
+  }
+
+  function formKindLabel(kind) {
+    return kind === "apikey" ? "API key" : kind === "note" ? "Secure note" : "Login"
+  }
+
   // ------------------------------------------------------------- add / edit
 
   function startAdd() {
@@ -292,6 +336,7 @@ Item {
     formUrl.text = ""
     formPassword.text = ""
     formNotes.text = ""
+    root.formKind = "login"
     root.formGenerate = true
     root.formShowPassword = false
     root.mode = "form"
@@ -307,6 +352,7 @@ Item {
     formUrl.text = rec.url
     formPassword.text = ""
     formNotes.text = ""
+    root.formKind = rec.type === "encryptedNotes" ? "note" : "login"
     root.formGenerate = false
     root.formShowPassword = false
     root.mode = "form"
@@ -337,6 +383,7 @@ Item {
       event.accepted = true
     }
     else if (ctrl && event.key === Qt.Key_H) { root.formShowPassword = !root.formShowPassword; event.accepted = true }
+    else if (ctrl && event.key === Qt.Key_K && !root.formUid) { root.cycleFormKind(); event.accepted = true }
   }
 
   function cancelForm() {
@@ -348,6 +395,7 @@ Item {
   function formFocusNext(fromIndex) {
     var order = [formTitle, formLogin, formUrl, formPassword, formNotes]
     var next = order[(fromIndex + 1) % order.length]
+    if (root.formKind === "note" && (next === formLogin || next === formUrl)) next = formPassword
     if (next === formPassword && root.formGenerate) next = formNotes
     next.forceActiveFocus()
     next.selectAll()
@@ -358,12 +406,17 @@ Item {
     var title = formTitle.text.trim()
     if (!title) { showToast("A title is required", true); formTitle.forceActiveFocus(); return }
     var password = root.formGenerate ? "$GEN" : formPassword.text
-    if (!root.formUid && !password) { showToast("Enter a password or let Keeper generate one", true); formPassword.forceActiveFocus(); return }
+    if (!root.formUid && !password) {
+      showToast(root.formKind === "note" ? "Enter the note text" : root.formKind === "apikey" ? "Paste the API key" : "Enter a password or let Keeper generate one", true)
+      formPassword.forceActiveFocus()
+      return
+    }
+    var kind = root.formKind === "note" ? "note" : "login"
     root.formBusy = true
     root.busyText = root.formUid ? "Saving " + title + "…" : "Adding " + title + "…"
     var argv = [scriptPath("omarchy-keeper-action")]
-    if (root.formUid) argv = argv.concat(["edit", root.formUid, title, formLogin.text.trim(), formUrl.text.trim(), password, formNotes.text])
-    else argv = argv.concat(["add", title, formLogin.text.trim(), formUrl.text.trim(), password, formNotes.text])
+    if (root.formUid) argv = argv.concat(["edit", root.formUid, title, formLogin.text.trim(), formUrl.text.trim(), password, formNotes.text, kind])
+    else argv = argv.concat(["add", title, formLogin.text.trim(), formUrl.text.trim(), password, formNotes.text, kind])
     formProc.command = argv
     formProc.running = true
   }
@@ -402,6 +455,9 @@ Item {
         if (root.pendingAdd) {
           root.pendingAdd = false
           if (root.ready) root.startAdd()
+        } else if (root.pendingExtra === -2) {
+          root.pendingExtra = -1
+          if (root.ready) Qt.callLater(function() { root.loadDetail() })
         }
       }
     }
@@ -433,6 +489,11 @@ Item {
           var d = JSON.parse(text)
           if (d && d.uid === root.detailUid) {
             root.detail = d
+            if (root.pendingExtra >= 0) {
+              var idx = root.pendingExtra
+              root.pendingExtra = -1
+              Qt.callLater(function() { root.copyExtra(idx) })
+            }
             if (root.mode === "form" && root.formUid === d.uid) {
               if (!formLogin.text) formLogin.text = d.login
               if (!formUrl.text) formUrl.text = d.url
@@ -472,6 +533,27 @@ Item {
       root.totpLoading = false
       if (exitCode === 3 || (exitCode === 0 && !root.totp)) root.showToast("This record has no TOTP", true)
       else if (exitCode !== 0) root.showToast("Could not fetch the TOTP code — see the notification", true)
+    }
+  }
+
+  Process {
+    id: clipProc
+    property string label: ""
+    property string payload: ""
+    stdout: StdioCollector { }
+    onStarted: {
+      write(payload + "\u0000")
+      payload = ""
+      stdinEnabled = false
+    }
+    onExited: function(exitCode, exitStatus) {
+      var rec = root.selectedRecord()
+      if (exitCode === 0) {
+        root.showToast("Copied " + label + (rec ? " for " + rec.title : "") + " · clipboard clears in " + root.status.clearSeconds + " s", false)
+        closeTimer.restart()
+      } else {
+        root.showToast("Nothing to copy for " + label, true)
+      }
     }
   }
 
@@ -615,6 +697,9 @@ Item {
           } else if (ctrl && event.key === Qt.Key_E) {
             root.startEdit()
             event.accepted = true
+          } else if (ctrl && event.key >= Qt.Key_1 && event.key <= Qt.Key_9) {
+            root.copyExtra(event.key - Qt.Key_1)
+            event.accepted = true
           } else if (ctrl && (event.key === Qt.Key_J || event.key === Qt.Key_K)) {
             root.move(event.key === Qt.Key_J ? 1 : -1)
             event.accepted = true
@@ -741,6 +826,57 @@ Item {
             spacing: Style.spacing.lg
             visible: root.ready && root.mode === "form"
 
+            Row {
+              width: parent.width
+              spacing: Style.spacing.md
+              visible: !root.formUid
+              Text {
+                textFormat: Text.PlainText
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Kind"
+                color: root.foreground
+                opacity: 0.6
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+              Repeater {
+                model: root.formKinds
+                delegate: Rectangle {
+                  required property string modelData
+                  readonly property bool current: modelData === root.formKind
+                  width: kindText.implicitWidth + Style.spacing.controlPaddingX * 2
+                  height: Style.spacing.controlHeight
+                  radius: root.cornerRadius
+                  color: current ? root.selectedBackground : "transparent"
+                  border.width: current ? 0 : Style.spacing.hairline
+                  border.color: root.border
+                  Text {
+                    id: kindText
+                    anchors.centerIn: parent
+                    text: root.formKindLabel(modelData)
+                    color: current ? root.selectedText : root.foreground
+                    opacity: current ? 1 : 0.7
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: { root.formKind = modelData; root.formGenerate = modelData === "login"; formTitle.forceActiveFocus() }
+                  }
+                }
+              }
+              Text {
+                textFormat: Text.PlainText
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Ctrl+K cycles"
+                color: root.foreground
+                opacity: 0.4
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
             FormRow {
               label: "Title"
               TextField {
@@ -750,13 +886,14 @@ Item {
                 Keys.onPressed: function(event) { root.formKey(event) }
                 placeholderText: "e.g. GitHub"
                 onAccepted: root.formFocusNext(0)
-                KeyNavigation.tab: formLogin
+                KeyNavigation.tab: root.formKind === "note" ? formPassword : formLogin
                 KeyNavigation.backtab: formNotes
               }
             }
 
             FormRow {
-              label: "Username or email"
+              visible: root.formKind !== "note"
+              label: root.formKind === "apikey" ? "Key ID or account (optional)" : "Username or email"
               TextField {
                 id: formLogin
                 width: parent.width
@@ -770,7 +907,8 @@ Item {
             }
 
             FormRow {
-              label: "Website"
+              visible: root.formKind !== "note"
+              label: root.formKind === "apikey" ? "Service URL" : "Website"
               TextField {
                 id: formUrl
                 width: parent.width
@@ -784,9 +922,10 @@ Item {
             }
 
             FormRow {
-              label: root.formUid ? "Password  ·  leave empty to keep the current one" : "Password"
+              label: (root.formKind === "note" ? "Secret note (masked in Keeper)" : root.formKind === "apikey" ? "API key" : "Password")
+                     + (root.formUid ? "  ·  leave empty to keep the current one" : "")
               hint: root.formGenerate ? "Keeper generates a strong password and copies it after saving   ·   Ctrl+G to type one instead"
-                    : "Ctrl+G lets Keeper generate one   ·   Ctrl+H " + (root.formShowPassword ? "hides" : "shows") + " it"
+                    : (root.formKind === "login" ? "Ctrl+G lets Keeper generate one   ·   " : "") + "Ctrl+H " + (root.formShowPassword ? "hides" : "shows") + " it"
               TextField {
                 id: formPassword
                 width: parent.width
@@ -956,6 +1095,8 @@ Item {
 
               readonly property var rec: root.selectedRecord()
               readonly property var d: root.detail
+              readonly property bool isNote: rec !== null && rec.type === "encryptedNotes"
+              readonly property bool hasLoaded: root.detail !== null && rec !== null && root.detailUid === rec.uid
               readonly property string login: d && d.login ? d.login : (rec ? rec.login : "")
               readonly property string url: d && d.url ? d.url : (rec ? rec.url : "")
 
@@ -991,6 +1132,7 @@ Item {
                 Item { width: 1; height: Style.spacing.sm }
 
                 DetailRow {
+                  visible: !detailPane.isNote
                   icon: root.iconUser
                   label: "Username"
                   value: detailPane.login || "—"
@@ -999,8 +1141,9 @@ Item {
 
                 DetailRow {
                   icon: root.iconKey
+                  visible: !detailPane.isNote
                   label: "Password"
-                  value: root.detail && root.detailUid === (detailPane.rec ? detailPane.rec.uid : "")
+                  value: detailPane.hasLoaded
                          ? (root.revealPassword ? (root.detail.password || "—") : (root.detail.password ? "••••••••••••" : "—"))
                          : "••••••••••••"
                   mono: root.revealPassword
@@ -1008,6 +1151,7 @@ Item {
                 }
 
                 DetailRow {
+                  visible: !detailPane.isNote
                   icon: root.iconClock
                   label: "One-time code"
                   value: root.totpLoading ? "fetching…"
@@ -1020,6 +1164,7 @@ Item {
                 }
 
                 DetailRow {
+                  visible: !detailPane.isNote
                   icon: root.iconLink
                   label: "Website"
                   value: detailPane.url || "—"
@@ -1027,21 +1172,37 @@ Item {
                 }
 
                 DetailRow {
-                  visible: !!(root.detail && root.detail.notes)
-                  icon: root.iconNote
-                  label: "Notes"
-                  value: root.detail && root.detail.notes ? root.detail.notes : ""
-                  multiline: true
+                  visible: detailPane.isNote && !detailPane.hasLoaded
+                  icon: "󰌾"
+                  label: "Note"
+                  value: "••••••••••••"
+                  hint: "Enter copies · Ctrl+Enter types · Ctrl+D reveals"
                 }
 
                 Repeater {
-                  model: root.detail && root.detail.custom ? root.detail.custom : []
+                  model: detailPane.hasLoaded && root.detail.extras ? root.detail.extras : []
                   delegate: DetailRow {
                     required property var modelData
-                    icon: "󰙅"
+                    required property int index
+                    icon: modelData.masked ? "󰌾" : root.iconNote
                     label: modelData.label
-                    value: modelData.value
+                    value: modelData.masked && !root.revealPassword ? "••••••••••••" : modelData.value
+                    mono: modelData.masked && root.revealPassword
+                    multiline: !modelData.masked
+                    hint: "Ctrl+" + (index + 1) + " copies" + (modelData.masked ? "   ·   Ctrl+D reveals" : "")
                   }
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  visible: !(root.detail && root.detailUid === (detailPane.rec ? detailPane.rec.uid : "")) && !root.detailLoading
+                  text: "Ctrl+D loads notes and custom fields   ·   Ctrl+1…9 copies one of them"
+                  color: root.foreground
+                  opacity: 0.4
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.Wrap
                 }
 
                 Text {
@@ -1070,9 +1231,9 @@ Item {
             verticalAlignment: Text.AlignVCenter
             text: root.busyText ? root.busyText
                   : root.toastText ? root.toastText
-                  : (root.ready && root.mode === "form") ? "⌃↵ save   ↵ next field   ⇥ / ⇧⇥ move   ⌃G generate   ⌃H show   Esc back"
+                  : (root.ready && root.mode === "form") ? "⌃↵ save   ↵ next field   ⇥ / ⇧⇥ move   ⌃K kind   ⌃G generate   ⌃H show   Esc back"
                   : (root.ready && root.status.daemon === "starting") ? "Warming up Keeper in the background — the first lookup may take a few seconds"
-                  : root.ready ? "↵ " + (root.status.defaultAction === "type" ? "type" : "copy") + " password   ⌃↵ type   ⌃U username   ⌃T code   ⌃O open   ⌃D details   ⌃N new   ⌃E edit   ⌃R refresh"
+                  : root.ready ? "↵ " + (root.status.defaultAction === "type" ? "type" : "copy") + " password   ⌃↵ type   ⌃U username   ⌃T code   ⌃O open   ⌃D details   ⌃1–9 copy field   ⌃N new   ⌃E edit   ⌃R refresh"
                   : "↵ set up Keeper   Esc close"
             color: root.toastText ? (root.toastIsError ? root.foreground : root.selectedText) : root.foreground
             opacity: root.busyText || root.toastText ? 1 : 0.5

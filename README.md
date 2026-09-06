@@ -22,7 +22,8 @@ your theme automatically.
   | `Ctrl+U` / `Ctrl+Shift+U` | copy / type the username |
   | `Ctrl+T` | fetch and show the one-time code with its countdown; again to copy it |
   | `Ctrl+O` | open the site in the browser |
-  | `Ctrl+D` | load the full record (notes, custom fields); again to reveal / hide the password |
+  | `Ctrl+D` | load the full record (notes, custom fields); again to reveal / hide masked values |
+  | `Ctrl+1` … `Ctrl+9` | copy the numbered note or custom field shown in the detail pane (loads details first if needed) |
   | `Ctrl+N` / `Ctrl+E` | add a login / edit the highlighted one, in place |
   | `Ctrl+R` | refresh the vault index |
   | `Esc` | clear the search, then close |
@@ -31,6 +32,16 @@ your theme automatically.
   password, notes); `Ctrl+E` edits the highlighted record. Keeper generates
   a strong password by default and it lands on the clipboard after saving;
   `Ctrl+G` switches to typing your own, `Ctrl+H` shows it, `Ctrl+↵` saves.
+  `Ctrl+K` cycles the kind: Login, API key (a login record whose password
+  field holds the key) or Secure note.
+- **API keys, tokens and notes.** Keeper has no dedicated API-key record type;
+  the plugin supports the three ways people store them:
+  - a *Login* record with the key in the password field (`Enter` copies it),
+    which is what the **API key** kind in the add form creates;
+  - a *Secure Note* (`Enter` copies the masked note body);
+  - masked custom fields of type `secret` on any record, shown numbered in the
+    detail pane after `Ctrl+D` and copied with `Ctrl+1` … `Ctrl+9`.
+  Record notes are copied the same way (`Notes` is always item 1 when present).
 - **Keeper** submenu in the Omarchy menu (`SUPER + SPACE` → Keeper, or
   `omarchy menu summon keeper`) with the picker, *Add a login…*, index
   refresh, sign-in and settings. A menu-style fallback picker built from
@@ -107,6 +118,7 @@ enrolment self-test fails and non-interactive use is not possible.
 | `omarchy-keeper-sync --notify` | Refresh the cached index |
 | `omarchy-keeper-config set DEFAULT_ACTION copy` | Change a setting from the terminal |
 | `omarchy-keeper-daemon status|stop|start` | Inspect or control the background helper |
+| `omarchy-shell shell summon dovijoel.keeper '{"query":"github"}'` | Open the picker with a search pre-filled (`"mode":"add"` opens the form, `"details":true` loads the record) |
 
 Settings live in `~/.config/omarchy-keeper/config`; the record index in
 `~/.cache/omarchy-keeper/index.json` (mode 600). The helper listens on
