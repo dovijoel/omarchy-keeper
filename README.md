@@ -70,8 +70,8 @@ you — see "How it fits into Omarchy" below).
 2. adds a `keeper` submenu to `~/.config/omarchy/extensions/omarchy-menu.jsonc`,
 3. registers and enables the overlay with the Omarchy shell (linking the repo
    into `~/.config/omarchy/plugins/` if you cloned it elsewhere),
-4. rebinds `SUPER + SHIFT + SLASH` from 1Password to the Keeper overlay in
-   `~/.config/hypr/bindings.lua`.
+4. asks, then rebinds `SUPER + SHIFT + SLASH` from 1Password to the Keeper
+   overlay in `~/.config/hypr/bindings.lua` (`--yes` skips the prompt).
 
 `install.sh --uninstall` reverses all of it and stops the background helper. Both steps are idempotent; the
 menu rows and the binding are wrapped in `omarchy-keeper begin/end` markers.

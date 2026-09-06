@@ -3,7 +3,8 @@
 # for the current user. Everything lives under $HOME; nothing needs sudo and
 # nothing under /usr/share/omarchy is touched.
 #
-#   ./install.sh              install / update
+#   ./install.sh              install / update (asks before touching the keybinding)
+#   ./install.sh --yes        same, without prompts
 #   ./install.sh --uninstall  remove the symlinks, menu rows and keybinding
 
 set -euo pipefail
@@ -12,6 +13,7 @@ here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 bin_dir="$HOME/.local/bin"
 menu_file="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/extensions/omarchy-menu.jsonc"
 bindings_file="${XDG_CONFIG_HOME:-$HOME/.config}/hypr/bindings.lua"
+ASSUME_YES=0
 begin_marker="omarchy-keeper begin"
 end_marker="omarchy-keeper end"
 
@@ -77,8 +79,17 @@ install() {
   omarchy-menu refresh >/dev/null 2>&1 || true
   echo "Added the Keeper submenu to $menu_file"
 
-  # Keybinding.
-  if [[ -f $bindings_file ]]; then
+  # Keybinding. This replaces Omarchy's stock SUPER+SHIFT+/ (1Password) binding,
+  # so ask first when a person is at the terminal; --yes skips the prompt.
+  local want_binding=1
+  if [[ -f $bindings_file ]] && (( ! ASSUME_YES )) && [[ -t 0 && -t 1 ]]; then
+    if ! gum confirm "Rebind SUPER+SHIFT+/ from 1Password to the Keeper picker in ~/.config/hypr/bindings.lua?" 2>/dev/null; then
+      want_binding=0
+      echo "Skipped the keybinding. Add it yourself with:"
+      cat "$here/bindings.lua"
+    fi
+  fi
+  if [[ -f $bindings_file ]] && (( want_binding )); then
     strip_block "$bindings_file"
     printf '\n%s' "$(cat "$here/bindings.lua")" >>"$bindings_file"
     printf '\n' >>"$bindings_file"
@@ -105,6 +116,10 @@ install() {
   echo "Next: run  omarchy-keeper-login  (or Keeper → Log in in the Omarchy menu) to enrol this device."
 }
 
+if [[ ${1:-} == --yes || ${2:-} == --yes ]]; then
+  ASSUME_YES=1
+  set -- "${@/--yes/}"
+fi
 case "${1:-}" in
   --uninstall | uninstall | remove) uninstall ;;
   "" | install | --install) KEEPER_MENU_ROWS="$here/menu.jsonc" install ;;
