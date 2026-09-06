@@ -1,0 +1,155 @@
+#!/bin/bash
+
+# omarchy:summary=Search the Keeper vault and copy or type a password, username or TOTP code
+# omarchy:group=keeper
+# omarchy:name=pick
+# omarchy:args=[--ask|--copy|--type] [--password|--login|--totp]
+# omarchy:examples=omarchy-keeper-pick|omarchy-keeper-pick --copy --totp
+
+set -euo pipefail
+source "$(dirname "$(readlink -f "$0")")/common.sh"
+
+keeper_config_load
+mode="$DEFAULT_ACTION"
+field="password"
+
+while (( $# > 0 )); do
+  case "$1" in
+    --ask | --copy | --type) mode="${1#--}" ;;
+    --password | --login | --totp) field="${1#--}" ;;
+    -h | --help)
+      echo "Usage: omarchy-keeper-pick [--ask|--copy|--type] [--password|--login|--totp]"
+      exit 0
+      ;;
+    *)
+      echo "omarchy-keeper-pick: unknown option $1" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+keeper_require || exit 1
+
+# Big vaults do not fit in one menu payload; ask for a search term first and
+# show only the matches. Small vaults get the full list straight away.
+query=""
+while :; do
+  rows=$(keeper_index_rows "$query") || exit 1
+  if [[ -z $rows ]]; then
+    if [[ -n $query ]]; then
+      keeper_notify "No Keeper records match \"$query\""
+      query=$(omarchy-menu-input "Search Keeper") || exit 0
+      continue
+    fi
+    keeper_notify "Your Keeper vault is empty" "Add a login from the Keeper menu"
+    exit 0
+  fi
+  selection=$(keeper_menu_select "${query:+Keeper: $query}${query:-Keeper}" <<<"$rows")
+  rc=$?
+  if (( rc == 2 )); then
+    query=$(omarchy-menu-input "Search Keeper (${query:-vault too large to list at once})") || exit 0
+    continue
+  fi
+  (( rc == 0 )) && [[ -n $selection ]] || exit 0
+  break
+done
+
+title=$(cut -f1 <<<"$selection")
+uid="${selection##* }"
+[[ $uid =~ ^[A-Za-z0-9_-]{16,}$ ]] || { keeper_notify -u critical "Could not read the record id" "$selection"; exit 1; }
+
+ICON_KEY=$OMARCHY_KEEPER_ICON
+ICON_USER=$'\U000f0004'   # nf-md-account
+ICON_TOTP=$'\U000f0954'   # nf-md-timer_sand? falls back gracefully if missing
+ICON_TYPE=$'\U000f030c'   # nf-md-keyboard
+ICON_LINK=$'\U000f0339'   # nf-md-link
+ICON_INFO=$'\U000f02fc'   # nf-md-information
+
+if [[ $mode == ask ]]; then
+  action_rows=$(printf '%s\n' \
+    "$ICON_KEY	Copy password" \
+    "$ICON_USER	Copy username" \
+    "$ICON_TOTP	Copy TOTP code" \
+    "$ICON_TYPE	Type password" \
+    "$ICON_TYPE	Type username" \
+    "$ICON_LINK	Open URL" \
+    "$ICON_INFO	Show details")
+  action=$(omarchy-menu-select "$title" -- --width 420 <<<"$action_rows") || exit 0
+else
+  case "$field" in
+    password) action="${mode^} password" ;;
+    login) action="${mode^} username" ;;
+    totp) action="${mode^} TOTP code" ;;
+  esac
+fi
+
+fetch() {
+  # $1 = password | login | totp
+  case "$1" in
+    password) keeper_run clipboard-copy "$uid" --output stdout ;;
+    login) keeper_run clipboard-copy "$uid" --output stdout --login ;;
+    totp) keeper_run clipboard-copy "$uid" --output stdout --totp ;;
+  esac
+}
+
+deliver() {
+  # $1 = copy | type, $2 = what (for the notification), $3 = value
+  local how="$1" what="$2" value="$3"
+  if [[ -z $value ]]; then
+    keeper_notify "No $what on this record" "$title"
+    return 1
+  fi
+  if [[ $how == type ]]; then
+    keeper_type_text "$value"
+  else
+    keeper_copy_sensitive "$value"
+    keeper_notify "Copied $what for $title" "Clipboard clears in ${CLIPBOARD_CLEAR_SECONDS}s"
+  fi
+}
+
+case "$action" in
+  "Copy password") deliver copy password "$(fetch password)" ;;
+  "Copy username") deliver copy username "$(fetch login)" ;;
+  "Copy TOTP code") deliver copy "TOTP code" "$(fetch totp)" ;;
+  "Type password") deliver type password "$(fetch password)" ;;
+  "Type username") deliver type username "$(fetch login)" ;;
+  "Open URL")
+    json=$(keeper_run get "$uid" --format json) || exit 1
+    url=$(keeper_json_field "$json" url)
+    if [[ -z $url ]]; then
+      keeper_notify "No URL on this record" "$title"
+      exit 0
+    fi
+    keeper_open_url "$url"
+    ;;
+  "Show details")
+    json=$(keeper_run get "$uid" --format json --unmask) || exit 1
+    details=$(jq -r --arg icon "$ICON_INFO" '
+      def clean: (. // "") | tostring | gsub("[\t\r\n]+"; " ");
+      def row(label; value): if (value | clean) == "" then empty else $icon + "\t" + label + "\t" + (value | clean) end;
+      def typed(t): ((.fields // []) + (.custom // [])) | map(select(.type == t)) | .[0].value // [] | (if type == "array" then .[0] else . end);
+      row("Title"; .title),
+      row("Type"; (.type // .record_type)),
+      row("Username"; (typed("login") // .login)),
+      row("URL"; (typed("url") // .login_url // .url)),
+      row("Notes"; .notes),
+      (((.custom // []) + (.fields // []))
+        | map(select(.type != "login" and .type != "url" and .type != "password" and .type != "oneTimeCode" and .type != "fileRef" and .type != "otp"))
+        | .[]
+        | select((.value // []) | length > 0)
+        | row((.label // .type); ((.value | if type == "array" then .[0] else . end) | tostring))),
+      row("Record UID"; .record_uid)
+    ' <<<"$json")
+    detail=$(omarchy-menu-select "$title" -- --width "$MENU_WIDTH" --maxheight "$MENU_MAXHEIGHT" <<<"$details") || exit 0
+    value=$(cut -f2- <<<"$detail")
+    label=$(cut -f1 <<<"$detail")
+    keeper_copy_sensitive "$value"
+    keeper_notify "Copied $label for $title" "Clipboard clears in ${CLIPBOARD_CLEAR_SECONDS}s"
+    ;;
+  *) exit 0 ;;
+esac
+
+# Keep the cached index fresh for next time without slowing this run down.
+setsid "$OMARCHY_KEEPER_BIN_DIR/omarchy-keeper-sync" >/dev/null 2>&1 </dev/null &
+disown

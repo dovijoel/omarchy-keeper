@@ -1,0 +1,50 @@
+#!/bin/bash
+
+# omarchy:summary=Refresh the cached index of Keeper record titles
+# omarchy:group=keeper
+# omarchy:name=sync
+# omarchy:args=[--notify]
+# omarchy:examples=omarchy-keeper-sync --notify
+
+set -euo pipefail
+source "$(dirname "$(readlink -f "$0")")/common.sh"
+
+notify=0
+[[ ${1:-} == --notify ]] && notify=1
+
+keeper_config_load
+keeper_require || exit 1
+
+# The index holds record UIDs, titles, logins and URLs only — the parts of
+# Commander's "login @ url" summary line. Passwords never leave Commander
+# until a record is picked.
+json=$(keeper_run list --format json) || exit 1
+
+if ! jq -e 'type == "array"' <<<"$json" >/dev/null 2>&1; then
+  if [[ $json == *"No records"* ]]; then
+    json="[]"
+  else
+    keeper_notify -u critical "Keeper index refresh failed" "Unexpected output from keeper list"
+    exit 1
+  fi
+fi
+
+tmp=$(mktemp "$OMARCHY_KEEPER_CACHE_DIR/index.XXXXXX")
+jq -c '
+  def clean: (. // "") | tostring | gsub("[\t\r\n]+"; " ") | gsub("^ +| +$"; "");
+  def host: (. // "") | sub("^[a-zA-Z][a-zA-Z0-9+.-]*://"; "") | if . == "" then "" else (split("/")[0] | split("?")[0] | sub("^www\\."; "") | ascii_downcase) end;
+  def is_url: test("^[a-zA-Z][a-zA-Z0-9+.-]*://") or test("^[a-z0-9.-]+\\.[a-z]{2,}(/|$)");
+  map(select(.record_uid != null)
+    | (.description | clean) as $d
+    | ($d | split(" @ ")) as $parts
+    | (if ($parts | length) >= 2 then {login: $parts[0], url: ($parts[1:] | join(" @ "))}
+       elif ($d | is_url) then {login: "", url: $d}
+       else {login: $d, url: ""} end) as $lu
+    | {record_uid, type: (.type // ""), title: (.title | clean), login: $lu.login, url: $lu.url, host: ($lu.url | host)})
+' <<<"$json" >"$tmp"
+chmod 600 "$tmp"
+mv -f "$tmp" "$OMARCHY_KEEPER_INDEX"
+
+count=$(jq length "$OMARCHY_KEEPER_INDEX")
+(( notify )) && keeper_notify "Keeper vault index refreshed" "$count records"
+exit 0

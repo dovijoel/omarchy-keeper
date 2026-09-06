@@ -1,0 +1,113 @@
+#!/bin/bash
+
+# omarchy:summary=Interactive Keeper enrolment (runs inside the floating terminal)
+# omarchy:group=keeper
+# omarchy:name=enrol
+# omarchy:hidden=true
+
+set -uo pipefail
+source "$(dirname "$(readlink -f "$0")")/common.sh"
+
+keeper_config_load
+
+say() { gum style --foreground 4 "$*" 2>/dev/null || echo "$*"; }
+ok() { gum style --foreground 2 "$*" 2>/dev/null || echo "$*"; }
+warn() { gum style --foreground 1 "$*" 2>/dev/null || echo "$*"; }
+
+echo
+say "Keeper for Omarchy — device enrolment"
+echo
+
+# --- 1. Keeper Commander ------------------------------------------------------
+if ! keeper_installed; then
+  warn "Keeper Commander (the official Keeper CLI) is not installed."
+  if ! command -v pipx >/dev/null 2>&1; then
+    warn "pipx is required to install it. Run: omarchy pkg add python-pipx"
+    echo "Then rerun: omarchy-keeper-login"
+    exit 1
+  fi
+  if gum confirm "Install Keeper Commander with pipx now?"; then
+    pipx install keepercommander || { warn "pipx install failed"; exit 1; }
+    hash -r
+  else
+    exit 1
+  fi
+fi
+keeper_installed || { warn "keeper is still not on PATH (expected ~/.local/bin/keeper)"; exit 1; }
+ok "Keeper Commander $(keeper --version 2>/dev/null | tail -n 1 | sed 's/^Keeper Commander, //')"
+echo
+
+# --- 2. Account details -------------------------------------------------------
+email=$(gum input --header "Keeper account email" --placeholder "you@example.com" --value "${KEEPER_USER:-}") || exit 1
+[[ -n $email ]] || { warn "An email address is required"; exit 1; }
+keeper_config_set KEEPER_USER "$email"
+
+region=$(gum choose --header "Keeper data centre" --selected "${KEEPER_REGION:-US}" US EU AU CA JP GOV) || exit 1
+keeper_config_set KEEPER_REGION "$region"
+server=$(keeper_region_server "$region")
+
+mode="${AUTH_MODE:-password-2fa}"
+say "Sign-in method: $mode  (change it under Keeper → Settings)"
+echo
+
+# --- 3. Commander config with the enrolment commands ---------------------------
+# Commander runs the `commands` list right after the interactive login, which
+# is the only moment "persistent login" can be switched on. Session material
+# itself is stored in the OS keychain (gnome-keyring), not in this file.
+enrol_cmds=(
+  "this-device register"
+  "this-device persistent-login on"
+  "this-device timeout 30d"
+  "this-device ip-auto-approve on"
+)
+[[ $mode == password-2fa ]] && enrol_cmds+=("this-device 2fa_expiration forever")
+enrol_cmds+=("q")
+
+mkdir -p "$OMARCHY_KEEPER_CONFIG_DIR"
+if [[ -f $OMARCHY_KEEPER_COMMANDER_CONFIG ]]; then
+  existing=$(cat "$OMARCHY_KEEPER_COMMANDER_CONFIG")
+else
+  existing='{}'
+fi
+jq -e 'type == "object"' <<<"$existing" >/dev/null 2>&1 || existing='{}'
+jq --arg user "$email" --arg server "$server" \
+  --argjson cmds "$(printf '%s\n' "${enrol_cmds[@]}" | jq -R . | jq -s .)" \
+  '. + {user: $user, server: $server, commands: $cmds}' <<<"$existing" >"$OMARCHY_KEEPER_COMMANDER_CONFIG"
+chmod 600 "$OMARCHY_KEEPER_COMMANDER_CONFIG"
+
+say "Sign in below. Enter your master password (and 2FA / approve the device"
+say "if asked). SSO accounts get a browser link. Commander then enrols this"
+say "device automatically and exits."
+echo
+
+"$OMARCHY_KEEPER_BIN_DIR/omarchy-keeper-daemon" stop >/dev/null 2>&1 || true
+keeper --config "$OMARCHY_KEEPER_COMMANDER_CONFIG" --user "$email" shell
+echo
+
+# The enrolment commands must not run again on every start.
+tmp=$(mktemp)
+jq 'del(.commands)' "$OMARCHY_KEEPER_COMMANDER_CONFIG" >"$tmp" && mv -f "$tmp" "$OMARCHY_KEEPER_COMMANDER_CONFIG"
+chmod 600 "$OMARCHY_KEEPER_COMMANDER_CONFIG"
+
+# --- 4. Self-test -------------------------------------------------------------
+say "Checking that Keeper now works without a password prompt…"
+if count=$(timeout 120 keeper --batch-mode --config "$OMARCHY_KEEPER_COMMANDER_CONFIG" list --format json </dev/null 2>/dev/null | jq 'if type == "array" then length else empty end' 2>/dev/null) && [[ -n $count ]]; then
+  ok "Enrolled. $count records visible."
+  "$OMARCHY_KEEPER_BIN_DIR/omarchy-keeper-sync" --notify >/dev/null 2>&1 || true
+  if [[ $USE_DAEMON == 1 ]] && command -v socat >/dev/null 2>&1; then
+    say "Starting the background helper that keeps Keeper warm…"
+    "$OMARCHY_KEEPER_BIN_DIR/omarchy-keeper-daemon" start >/dev/null 2>&1 || true
+  fi
+  echo
+  say "Press SUPER+SHIFT+/ (or open Keeper in the Omarchy menu) to pick a password."
+else
+  warn "Keeper still asks for credentials when run non-interactively."
+  echo "Common causes:"
+  echo "  • The login above was cancelled or failed."
+  echo "  • Your Keeper admin has disabled 'Stay Logged In' (persistent login) by policy."
+  echo "  • 2FA is required on every login: choose 'Master password + 2FA' under"
+  echo "    Keeper → Settings and enrol again so 2FA is remembered on this device."
+  echo
+  echo "Diagnose with:  keeper --config $(printf '%q' "$OMARCHY_KEEPER_COMMANDER_CONFIG") shell"
+  exit 1
+fi

@@ -1,0 +1,67 @@
+#!/bin/bash
+
+# omarchy:summary=Keep Keeper Commander warm in the background for instant lookups
+# omarchy:group=keeper
+# omarchy:name=daemon
+# omarchy:args=<start|stop|status|restart>
+# omarchy:hidden=true
+
+set -euo pipefail
+source "$(dirname "$(readlink -f "$0")")/common.sh"
+
+keeper_config_load
+
+sock=$(keeper_daemon_socket)
+log="$OMARCHY_KEEPER_CACHE_DIR/daemon.log"
+idle="${DAEMON_IDLE_SECONDS:-1800}"
+
+start() {
+  if keeper_daemon_ping; then
+    echo "daemon already running ($sock)"
+    return 0
+  fi
+  keeper_installed || { echo "keeper is not installed" >&2; return 1; }
+  [[ -f $OMARCHY_KEEPER_COMMANDER_CONFIG ]] || { echo "not enrolled; run omarchy-keeper-login" >&2; return 1; }
+  local python
+  python="$(dirname "$(readlink -f "$(command -v keeper)")")/python"
+  [[ -x $python ]] || python="$(command -v python3)"
+  mkdir -p "$OMARCHY_KEEPER_CACHE_DIR"
+  rm -f "$sock"
+  ( umask 077; : >>"$log" )
+  setsid "$python" "$OMARCHY_KEEPER_BIN_DIR/omarchy-keeper-daemon.py" \
+    "$OMARCHY_KEEPER_COMMANDER_CONFIG" "$sock" "$idle" </dev/null >>"$log" 2>&1 &
+  disown
+  local waited=0
+  while (( waited < 60 )); do
+    if keeper_daemon_ping; then
+      echo "daemon ready ($sock)"
+      return 0
+    fi
+    sleep 0.5
+    waited=$(( waited + 1 ))
+  done
+  echo "daemon did not come up; see $log" >&2
+  return 1
+}
+
+stop() {
+  if [[ -S $sock ]]; then
+    keeper_daemon_request '{"op":"quit"}' >/dev/null 2>&1 || true
+    sleep 0.2
+  fi
+  rm -f "$sock"
+  echo "daemon stopped"
+}
+
+case "${1:-status}" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start ;;
+  status)
+    if keeper_daemon_ping; then echo "running ($sock)"; else echo "not running"; exit 1; fi
+    ;;
+  *)
+    echo "Usage: omarchy-keeper-daemon <start|stop|status|restart>" >&2
+    exit 1
+    ;;
+esac

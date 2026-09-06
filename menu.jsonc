@@ -1,0 +1,16 @@
+  // omarchy-keeper begin — installed by omarchy-keeper/install.sh; do not edit between the markers
+  "keeper": {"icon":"󰌆","label":"Keeper","aliases":["keeper","passwords","password"]},
+  "keeper.pick": {"icon":"󰌆","label":"Find a login…","description":"Copy or type a password, username or TOTP code","action":"omarchy-shell shell summon dovijoel.keeper '{}'"},
+  "keeper.pick-menu": {"icon":"","label":"Find a login (menu style)…","description":"Fallback picker built from Omarchy menus","action":"omarchy-keeper-pick --ask"},
+  "keeper.add": {"icon":"","label":"Add a login…","action":"omarchy-shell shell summon dovijoel.keeper '{\"mode\":\"add\"}'"},
+  "keeper.sync": {"icon":"","label":"Refresh vault index","action":"omarchy-keeper-sync --notify"},
+  "keeper.login": {"icon":"󰍁","label":"Log in / re-authenticate","action":"omarchy-keeper-login"},
+  "keeper.settings": {"icon":"","label":"Settings"},
+  "keeper.settings.action-ask": {"icon":"","label":"Ask what to do each time","checked":"omarchy-keeper-config get DEFAULT_ACTION ask","action":"omarchy-keeper-config set DEFAULT_ACTION ask"},
+  "keeper.settings.action-copy": {"icon":"","label":"Copy the password straight away","checked":"omarchy-keeper-config get DEFAULT_ACTION copy","action":"omarchy-keeper-config set DEFAULT_ACTION copy"},
+  "keeper.settings.action-type": {"icon":"󰌌","label":"Type the password straight away","checked":"omarchy-keeper-config get DEFAULT_ACTION type","action":"omarchy-keeper-config set DEFAULT_ACTION type"},
+  "keeper.settings.daemon": {"icon":"󰓅","label":"Keep Keeper warm in the background","description":"Instant lookups; helper exits after 30 idle minutes","checked":"omarchy-keeper-config get USE_DAEMON 1","action":"if omarchy-keeper-config get USE_DAEMON 1; then omarchy-keeper-config set USE_DAEMON 0; omarchy-keeper-daemon stop; else omarchy-keeper-config set USE_DAEMON 1; omarchy-keeper-daemon start; fi"},
+  "keeper.settings.clear": {"icon":"󰅐","label":"Clipboard clear delay…","action":"omarchy-keeper-config prompt CLIPBOARD_CLEAR_SECONDS"},
+  "keeper.settings.auth": {"icon":"󰒃","label":"Sign-in method (password / 2FA / SSO)…","action":"omarchy-keeper-login --choose-mode"},
+  "keeper.settings.edit": {"icon":"","label":"Edit settings file","action":"omarchy-keeper-config edit"},
+  // omarchy-keeper end

@@ -1,0 +1,98 @@
+#!/bin/bash
+
+# omarchy:summary=Add a new login record to your Keeper vault
+# omarchy:group=keeper
+# omarchy:name=add
+# omarchy:examples=omarchy-keeper-add
+
+set -euo pipefail
+source "$(dirname "$(readlink -f "$0")")/common.sh"
+
+keeper_config_load
+keeper_require || exit 1
+
+ICON_WINDOW=$'\U000f05af' # nf-md-window_maximize
+ICON_EDIT=$'\U000f03eb'   # nf-md-pencil
+ICON_GEN=$'\U000f0ec9'    # nf-md-dice_multiple (any glyph works)
+ICON_CLIP=$'\U000f0e02'   # nf-md-clipboard_text
+ICON_NONE=$'\U000f0156'   # nf-md-close
+ICON_LINK=$'\U000f0339'   # nf-md-link
+
+# --- Title -------------------------------------------------------------------
+window_title=$(hyprctl activewindow -j 2>/dev/null | jq -r '.title // empty' 2>/dev/null || true)
+window_title="${window_title//$'\t'/ }"
+if [[ -n $window_title ]]; then
+  choice=$(printf '%s\n' \
+    "$ICON_WINDOW	$window_title	Use the active window title" \
+    "$ICON_EDIT	Enter a title…" |
+    omarchy-menu-select "New Keeper login" -- --width "$MENU_WIDTH") || exit 0
+  if [[ $choice == "Enter a title…" ]]; then
+    title=$(omarchy-menu-input "Title") || exit 0
+  else
+    title=$(cut -f1 <<<"$choice")
+  fi
+else
+  title=$(omarchy-menu-input "Title") || exit 0
+fi
+[[ -n $title ]] || exit 0
+
+# --- Username ----------------------------------------------------------------
+login=$(omarchy-menu-input "Username or email for $title") || exit 0
+
+# --- URL ---------------------------------------------------------------------
+choice=$(printf '%s\n' \
+  "$ICON_LINK	Enter a URL…" \
+  "$ICON_NONE	No URL" |
+  omarchy-menu-select "Website for $title" -- --width 420) || exit 0
+url=""
+if [[ $choice == "Enter a URL…" ]]; then
+  url=$(omarchy-menu-input "URL") || exit 0
+fi
+
+# --- Password ----------------------------------------------------------------
+choice=$(printf '%s\n' \
+  "$ICON_GEN	Generate a strong password	Keeper generates it; copied to your clipboard afterwards" \
+  "$ICON_CLIP	Use the clipboard contents	Whatever is on the clipboard right now" \
+  "$ICON_EDIT	Enter it now	Shown on screen while you type" |
+  omarchy-menu-select "Password for $title" -- --width 520) || exit 0
+generated=0
+case "$(cut -f1 <<<"$choice")" in
+  "Generate a strong password")
+    password='$GEN'
+    generated=1
+    ;;
+  "Use the clipboard contents")
+    password=$(wl-paste --no-newline 2>/dev/null || true)
+    if [[ -z $password ]]; then
+      keeper_notify -u critical "Clipboard is empty" "Nothing to use as the password"
+      exit 1
+    fi
+    ;;
+  "Enter it now")
+    password=$(omarchy-menu-input "Password for $title (visible)") || exit 0
+    [[ -n $password ]] || exit 0
+    ;;
+  *) exit 0 ;;
+esac
+
+# --- Create ------------------------------------------------------------------
+args=(record-add --title "$title" --record-type login --format json "login=$login" "password=$password")
+[[ -n $url ]] && args+=("url=$url")
+
+out=$(keeper_run "${args[@]}") || exit 1
+new_uid=$(jq -r '.record_uid // empty' <<<"$out" 2>/dev/null || true)
+[[ -n $new_uid ]] || new_uid=$(grep -oE '[A-Za-z0-9_-]{22}' <<<"$out" | head -n 1 || true)
+
+if (( generated )) && [[ -n $new_uid ]]; then
+  if secret=$(keeper_run clipboard-copy "$new_uid" --output stdout) && [[ -n $secret ]]; then
+    keeper_copy_sensitive "$secret"
+    keeper_notify "Added $title to Keeper" "Generated password copied — clipboard clears in ${CLIPBOARD_CLEAR_SECONDS}s"
+  else
+    keeper_notify "Added $title to Keeper" "Open the record to copy the generated password"
+  fi
+else
+  keeper_notify "Added $title to Keeper" "${login:+$login}"
+fi
+
+setsid "$OMARCHY_KEEPER_BIN_DIR/omarchy-keeper-sync" >/dev/null 2>&1 </dev/null &
+disown

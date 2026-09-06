@@ -1,0 +1,74 @@
+#!/bin/bash
+
+# omarchy:summary=Read or change omarchy-keeper settings
+# omarchy:group=keeper
+# omarchy:name=config
+# omarchy:args=<get KEY [VALUE] | set KEY VALUE | prompt KEY | path | edit>
+# omarchy:examples=omarchy-keeper-config set DEFAULT_ACTION copy|omarchy-keeper-config get DEFAULT_ACTION
+
+set -euo pipefail
+source "$(dirname "$(readlink -f "$0")")/common.sh"
+
+usage() {
+  echo "Usage: omarchy-keeper-config <get KEY [VALUE] | set KEY VALUE | prompt KEY | path | edit>" >&2
+  exit 1
+}
+
+keeper_config_load
+
+case "${1:-}" in
+  get)
+    [[ -n ${2:-} ]] || usage
+    current="${!2:-}"
+    if (( $# >= 3 )); then
+      # `get KEY VALUE` is a predicate for `checked:` menu rows.
+      [[ $current == "$3" ]]
+    else
+      printf '%s\n' "$current"
+    fi
+    ;;
+  set)
+    [[ -n ${2:-} && $# -ge 3 ]] || usage
+    case "$2" in
+      DEFAULT_ACTION)
+        [[ $3 =~ ^(ask|copy|type)$ ]] || { echo "DEFAULT_ACTION must be ask, copy or type" >&2; exit 1; }
+        ;;
+      CLIPBOARD_CLEAR_SECONDS | MENU_WIDTH | MENU_MAXHEIGHT)
+        [[ $3 =~ ^[0-9]+$ ]] || { echo "$2 must be a whole number" >&2; exit 1; }
+        ;;
+      USE_DAEMON)
+        [[ $3 =~ ^[01]$ ]] || { echo "USE_DAEMON must be 0 or 1" >&2; exit 1; }
+        ;;
+      DAEMON_IDLE_SECONDS)
+        [[ $3 =~ ^[0-9]+$ ]] || { echo "DAEMON_IDLE_SECONDS must be a whole number" >&2; exit 1; }
+        ;;
+      AUTH_MODE)
+        [[ $3 =~ ^(password|password-2fa|sso|)$ ]] || { echo "AUTH_MODE must be password, password-2fa or sso" >&2; exit 1; }
+        ;;
+    esac
+    keeper_config_set "$2" "$3"
+    ;;
+  prompt)
+    [[ -n ${2:-} ]] || usage
+    current="${!2:-}"
+    label="$2"
+    case "$2" in
+      CLIPBOARD_CLEAR_SECONDS) label="Clear clipboard after how many seconds?" ;;
+    esac
+    value=$(omarchy-menu-input "$label (now: ${current:-unset})") || exit 0
+    "$0" set "$2" "$value" || {
+      keeper_notify -u critical "Invalid value for $2" "$value"
+      exit 1
+    }
+    keeper_notify "Keeper setting saved" "$2 = $value"
+    ;;
+  path)
+    printf '%s\n' "$OMARCHY_KEEPER_CONFIG"
+    ;;
+  edit)
+    omarchy-launch-config-editor "$OMARCHY_KEEPER_CONFIG"
+    ;;
+  *)
+    usage
+    ;;
+esac

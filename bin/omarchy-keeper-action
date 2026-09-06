@@ -1,0 +1,193 @@
+#!/bin/bash
+
+# omarchy:summary=Backend for the Keeper overlay: status, record details, copy, type, open, add
+# omarchy:group=keeper
+# omarchy:name=action
+# omarchy:hidden=true
+# omarchy:args=<status | get UID | totp UID | copy UID FIELD | type UID FIELD | open UID | add TITLE LOGIN URL PASSWORD [NOTES] | edit UID TITLE LOGIN URL PASSWORD [NOTES] | delete UID>
+
+set -euo pipefail
+source "$(dirname "$(readlink -f "$0")")/common.sh"
+
+keeper_config_load
+
+cmd="${1:-}"
+shift || true
+
+fetch_field() {
+  # $1 = uid, $2 = password | login | totp
+  case "$2" in
+    password) keeper_run clipboard-copy "$1" --output stdout ;;
+    login) keeper_run clipboard-copy "$1" --output stdout --login ;;
+    totp) keeper_run clipboard-copy "$1" --output stdout --totp ;;
+    *) return 1 ;;
+  esac
+}
+
+case "$cmd" in
+  status)
+    installed=false; enrolled=false; count=0; age=-1
+    keeper_installed && installed=true
+    [[ -f $OMARCHY_KEEPER_COMMANDER_CONFIG ]] && enrolled=true
+    if keeper_index_fresh; then
+      count=$(jq length "$OMARCHY_KEEPER_INDEX")
+      age=$(( $(date +%s) - $(stat -c %Y "$OMARCHY_KEEPER_INDEX") ))
+    fi
+    daemon="off"
+    if [[ $USE_DAEMON == 1 ]]; then
+      if keeper_daemon_ping; then
+        daemon="running"
+      elif $installed && $enrolled; then
+        daemon="starting"
+        keeper_daemon_autostart || true
+      else
+        daemon="stopped"
+      fi
+    fi
+    jq -n --argjson installed "$installed" --argjson enrolled "$enrolled" \
+      --argjson count "$count" --argjson age "$age" \
+      --arg action "$DEFAULT_ACTION" --argjson clear "$CLIPBOARD_CLEAR_SECONDS" \
+      --arg index "$OMARCHY_KEEPER_INDEX" --arg daemon "$daemon" \
+      '{installed: $installed, enrolled: $enrolled, count: $count, indexAge: $age,
+        defaultAction: $action, clearSeconds: $clear, indexPath: $index, daemon: $daemon}'
+    ;;
+
+  get)
+    # Full record for the detail pane. Secrets stay inside the shell process.
+    uid="${1:?uid}"
+    keeper_require || exit 1
+    json=$(keeper_run get "$uid" --format json --unmask) || exit 1
+    jq -c '
+      def first_value: if type == "array" then (.[0] // "") else (. // "") end;
+      def typed(t): ((.fields // []) + (.custom // [])) | map(select(.type == t)) | .[0].value // [] | first_value;
+      def clean: (. // "") | tostring;
+      {
+        uid: .record_uid,
+        title: (.title | clean),
+        type: (.type // .record_type // "" | clean),
+        login: ((typed("login") | clean) as $l | if $l == "" then (.login // "" | clean) else $l end),
+        url: ((typed("url") | clean) as $u | if $u == "" then (.login_url // .url // "" | clean) else $u end),
+        password: ((typed("password") | clean) as $p | if $p == "" then (.password // "" | clean) else $p end),
+        hasTotp: (((typed("oneTimeCode") | clean) != "") or ((typed("otp") | clean) != "") or ((.totp // "") != "")),
+        notes: (.notes // "" | clean),
+        folder: (.folder.path // "" | clean),
+        modified: (.client_modified_time // "" | clean),
+        custom: (((.custom // []) + (.fields // []))
+          | map(select((.type // "") as $t | ["login","url","password","oneTimeCode","otp","fileRef","passkey"] | index($t) | not))
+          | map(select(((.value // []) | if type == "array" then length else 1 end) > 0))
+          | map({label: (.label // .type // "" | clean), value: ((.value | first_value) | tostring)})
+          | map(select(.value != "" and .value != "{}")))
+      }' <<<"$json"
+    ;;
+
+  totp)
+    uid="${1:?uid}"
+    keeper_require || exit 1
+    code=$(fetch_field "$uid" totp) || exit 1
+    code="${code//[[:space:]]/}"
+    if [[ -z $code ]]; then
+      echo "empty" >&2
+      exit 3
+    fi
+    now=$(date +%s)
+    jq -n --arg code "$code" --argjson left $(( 30 - now % 30 )) --argjson period 30 \
+      '{code: $code, secondsLeft: $left, period: $period}'
+    ;;
+
+  copy)
+    uid="${1:?uid}"; field="${2:-password}"
+    keeper_require || exit 1
+    value=$(fetch_field "$uid" "$field") || exit 1
+    if [[ -z $value ]]; then
+      echo "empty" >&2
+      exit 3
+    fi
+    keeper_copy_sensitive "$value"
+    echo "copied"
+    ;;
+
+  type)
+    uid="${1:?uid}"; field="${2:-password}"
+    keeper_require || exit 1
+    value=$(fetch_field "$uid" "$field") || exit 1
+    if [[ -z $value ]]; then
+      echo "empty" >&2
+      exit 3
+    fi
+    keeper_type_text "$value"
+    echo "typed"
+    ;;
+
+  open)
+    uid="${1:?uid}"
+    url=$(jq -r --arg uid "$uid" '.[] | select(.record_uid == $uid) | .url // ""' "$OMARCHY_KEEPER_INDEX" 2>/dev/null | head -n 1)
+    if [[ -z $url ]]; then
+      keeper_require || exit 1
+      json=$(keeper_run get "$uid" --format json) || exit 1
+      url=$(keeper_json_field "$json" url)
+    fi
+    [[ -n $url ]] || { echo "no url" >&2; exit 3; }
+    keeper_open_url "$url"
+    echo "opened"
+    ;;
+
+  add)
+    # add TITLE LOGIN URL PASSWORD [NOTES]; PASSWORD "$GEN" generates one and
+    # copies it to the clipboard afterwards so the user can paste it right away.
+    title="${1:?title}"; login="${2:-}"; url="${3:-}"; password="${4:-\$GEN}"; notes="${5:-}"
+    keeper_require || exit 1
+    args=(record-add --title "$title" --record-type login --format json "login=$login" "password=$password")
+    [[ -n $url ]] && args+=("url=$url")
+    [[ -n $notes ]] && args+=(--notes "$notes")
+    out=$(keeper_run "${args[@]}") || exit 1
+    new_uid=$(jq -r '.record_uid // empty' <<<"$out" 2>/dev/null || true)
+    [[ -n $new_uid ]] || new_uid=$(grep -oE '[A-Za-z0-9_-]{22}' <<<"$out" | head -n 1 || true)
+    copied=false
+    if [[ $password == '$GEN' && -n $new_uid ]]; then
+      if secret=$(fetch_field "$new_uid" password) && [[ -n $secret ]]; then
+        keeper_copy_sensitive "$secret"
+        copied=true
+      fi
+    fi
+    jq -n --arg uid "$new_uid" --arg title "$title" --argjson copied "$copied" '{uid: $uid, title: $title, copied: $copied}'
+    setsid "$OMARCHY_KEEPER_BIN_DIR/omarchy-keeper-sync" >/dev/null 2>&1 </dev/null &
+    disown
+    ;;
+
+  edit)
+    # edit UID TITLE LOGIN URL PASSWORD [NOTES]; an empty PASSWORD keeps the
+    # current one, "$GEN" generates a new one.
+    uid="${1:?uid}"; title="${2:-}"; login="${3:-}"; url="${4:-}"; password="${5:-}"; notes="${6:-}"
+    keeper_require || exit 1
+    args=(record-update -r "$uid" --force)
+    [[ -n $title ]] && args+=(--title "$title")
+    args+=("login=$login" "url=$url")
+    [[ -n $password ]] && args+=("password=$password")
+    [[ -n $notes ]] && args+=(--notes "$notes")
+    keeper_run "${args[@]}" >/dev/null || exit 1
+    copied=false
+    if [[ $password == '$GEN' ]]; then
+      if secret=$(fetch_field "$uid" password) && [[ -n $secret ]]; then
+        keeper_copy_sensitive "$secret"
+        copied=true
+      fi
+    fi
+    jq -n --arg uid "$uid" --arg title "$title" --argjson copied "$copied" '{uid: $uid, title: $title, copied: $copied}'
+    setsid "$OMARCHY_KEEPER_BIN_DIR/omarchy-keeper-sync" >/dev/null 2>&1 </dev/null &
+    disown
+    ;;
+
+  delete)
+    uid="${1:?uid}"
+    keeper_require || exit 1
+    keeper_run rm --force "$uid" >/dev/null || exit 1
+    jq -n --arg uid "$uid" '{uid: $uid, deleted: true}'
+    setsid "$OMARCHY_KEEPER_BIN_DIR/omarchy-keeper-sync" >/dev/null 2>&1 </dev/null &
+    disown
+    ;;
+
+  *)
+    echo "Usage: omarchy-keeper-action <status | get UID | totp UID | copy UID FIELD | type UID FIELD | open UID | add TITLE LOGIN URL PASSWORD [NOTES] | edit UID TITLE LOGIN URL PASSWORD [NOTES] | delete UID>" >&2
+    exit 1
+    ;;
+esac

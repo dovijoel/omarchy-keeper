@@ -1,0 +1,60 @@
+#!/bin/bash
+
+# omarchy:summary=Sign in to Keeper and enrol this device for password-free use
+# omarchy:group=keeper
+# omarchy:name=login
+# omarchy:args=[--choose-mode] [--mode password|password-2fa|sso]
+# omarchy:examples=omarchy-keeper-login|omarchy-keeper-login --mode sso
+
+set -euo pipefail
+source "$(dirname "$(readlink -f "$0")")/common.sh"
+
+keeper_config_load
+
+choose_only=0
+mode="$AUTH_MODE"
+while (( $# > 0 )); do
+  case "$1" in
+    --choose-mode) choose_only=1 ;;
+    --mode)
+      shift
+      mode="${1:-}"
+      ;;
+    -h | --help)
+      echo "Usage: omarchy-keeper-login [--choose-mode] [--mode password|password-2fa|sso]"
+      exit 0
+      ;;
+    *)
+      echo "omarchy-keeper-login: unknown option $1" >&2
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+ICON_2FA=$'\U000f0bdd'  # nf-md-shield_key
+ICON_PW=$'\U000f033e'   # nf-md-lock
+ICON_SSO=$'\U000f01af'  # nf-md-domain
+
+choose_mode() {
+  local rows choice
+  rows=$(printf '%s\n' \
+    "$ICON_2FA	Master password + 2FA	password-2fa" \
+    "$ICON_PW	Master password only	password" \
+    "$ICON_SSO	Enterprise SSO	sso")
+  choice=$(omarchy-menu-select "How do you sign in to Keeper?" -- --width 480 <<<"$rows") || return 1
+  cut -f2 <<<"$choice"
+}
+
+if (( choose_only )) || [[ ! $mode =~ ^(password|password-2fa|sso)$ ]]; then
+  mode=$(choose_mode) || exit 0
+fi
+keeper_config_set AUTH_MODE "$mode"
+
+if (( choose_only )); then
+  keeper_notify "Keeper sign-in method saved" "Run Log in / re-authenticate to apply it"
+  exit 0
+fi
+
+enrol="$OMARCHY_KEEPER_BIN_DIR/omarchy-keeper-enrol"
+omarchy-launch-floating-terminal-with-presentation "$(printf '%q' "$enrol")"

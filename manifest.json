@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "dovijoel.keeper",
+  "name": "Keeper",
+  "version": "0.1.0",
+  "author": "Dovi Joel",
+  "license": "MIT",
+  "description": "Search your Keeper vault, copy or type passwords, usernames and TOTP codes, and add new logins from the Omarchy menu or a keybinding.",
+  "kinds": [
+    "overlay"
+  ],
+  "entryPoints": {
+    "overlay": "Keeper.qml"
+  }
+}
